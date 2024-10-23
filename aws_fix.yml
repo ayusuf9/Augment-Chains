@@ -24,6 +24,30 @@ phases:
   pre_build:
     commands:
       - echo Starting Pre-Build Phase
+      # Add kubectl configuration to increase rate limits
+      - |
+        cat << EOF > ~/.kube/config-rate-limits
+        apiVersion: v1
+        kind: Config
+        preferences:
+          colors: true
+        current-context: eks_context
+        contexts:
+        - context:
+            cluster: eks_cluster
+            user: eks_user
+          name: eks_context
+        clusters:
+        - cluster:
+            server: https://kubernetes.default.svc
+            certificate-authority: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+          name: eks_cluster
+        users:
+        - name: eks_user
+          user:
+            token: $(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+        EOF
+      - export KUBECONFIG=~/.kube/config-rate-limits
 
   build:
     commands:
@@ -35,52 +59,62 @@ phases:
       - export AWS_SESSION_TOKEN=$(echo $temp_role | jq -r .Credentials.SessionToken)
       - export AWS_REGION=$CLUSTER_REGION
       - aws eks update-kubeconfig --name $CLUSTER_NAME --region $CLUSTER_REGION
+      
+      # Check cluster access and resources
       - kubectl get nodes
       - kubectl cluster-info
       - NAMESPACE=$(yq -r .namespace helm-chart/dev.yaml)
+      
+      # Clean up any failed previous deployments
+      - |
+        if kubectl get namespace $NAMESPACE 2>/dev/null; then
+          echo "Cleaning up previous deployment..."
+          kubectl delete deployment -n $NAMESPACE $HELM_CHART_NAME --timeout=5m || true
+          kubectl delete service -n $NAMESPACE $HELM_CHART_NAME --timeout=5m || true
+          sleep 30
+        fi
+      
+      # Pull and deploy Helm chart with retry logic
       - helm pull oci://$HELM_CHART_REPO --version $HELM_CHART_VERSION
-      - ls -lrt
-      - helm list -n $NAMESPACE || true
-      - kubectl get pods -n $NAMESPACE || true
       - |
-        echo "Starting Helm deployment..."
-        helm upgrade --install $HELM_CHART_NAME ./$HELM_CHART_NAME-$HELM_CHART_VERSION.tgz \
-          -f helm-chart/dev.yaml \
-          --create-namespace \
-          --namespace $NAMESPACE \
-          --timeout 30m \
-          --wait \
-          --debug \
-          --set resources.limits.cpu="1000m" \
-          --set resources.limits.memory="4Gi" \
-          --set resources.requests.cpu="250m" \
-          --set resources.requests.memory="2Gi"
-      - |
-        echo "Waiting for deployment to complete..."
-        TIMEOUT=1200
-        INTERVAL=10
-        ELAPSED=0
+        MAX_RETRIES=3
+        RETRY_COUNT=0
+        DEPLOYED=false
         
-        while [ $ELAPSED -lt $TIMEOUT ]; do
-          DEPLOY_STATUS=$(kubectl get deployment -n $NAMESPACE $HELM_CHART_NAME -o jsonpath='{.status.conditions[?(@.type=="Available")].status}' 2>/dev/null || echo "NotFound")
-          POD_STATUS=$(kubectl get pods -n $NAMESPACE -l app.kubernetes.io/instance=$HELM_CHART_NAME -o jsonpath='{.items[*].status.phase}' 2>/dev/null || echo "NoPods")
+        while [ $RETRY_COUNT -lt $MAX_RETRIES ] && [ "$DEPLOYED" != "true" ]; do
+          echo "Deployment attempt $(($RETRY_COUNT + 1)) of $MAX_RETRIES"
           
-          echo "Deployment Status: $DEPLOY_STATUS"
-          echo "Pod Status: $POD_STATUS"
+          helm upgrade --install $HELM_CHART_NAME ./$HELM_CHART_NAME-$HELM_CHART_VERSION.tgz \
+            -f helm-chart/dev.yaml \
+            --create-namespace \
+            --namespace $NAMESPACE \
+            --timeout 10m \
+            --wait \
+            --debug \
+            --set resources.limits.cpu="1000m" \
+            --set resources.limits.memory="4Gi" \
+            --set resources.requests.cpu="250m" \
+            --set resources.requests.memory="2Gi" \
+            --set global.kubectl.image.pullPolicy=Always && DEPLOYED=true
           
-          if [ "$DEPLOY_STATUS" == "True" ] && [ "$POD_STATUS" == "Running" ]; then
-            echo "Deployment successfully completed!"
-            break
-          fi
-          
-          sleep $INTERVAL
-          ELAPSED=$((ELAPSED + INTERVAL))
-          
-          if [ $((ELAPSED % 60)) -eq 0 ]; then
-            echo "Still waiting... ($ELAPSED seconds elapsed)"
-            kubectl get pods -n $NAMESPACE -l app.kubernetes.io/instance=$HELM_CHART_NAME || true
+          if [ "$DEPLOYED" != "true" ]; then
+            RETRY_COUNT=$((RETRY_COUNT + 1))
+            echo "Deployment failed. Waiting 30 seconds before retry..."
+            sleep 30
           fi
         done
+        
+        if [ "$DEPLOYED" != "true" ]; then
+          echo "All deployment attempts failed"
+          exit 1
+        fi
+
+      # Verify deployment
+      - |
+        echo "Verifying deployment..."
+        kubectl get pods -n $NAMESPACE -l app.kubernetes.io/instance=$HELM_CHART_NAME -o wide
+        kubectl get services -n $NAMESPACE -l app.kubernetes.io/instance=$HELM_CHART_NAME
+        kubectl get events -n $NAMESPACE --sort-by=.metadata.creationTimestamp | tail -10
 
   post_build:
     commands:
