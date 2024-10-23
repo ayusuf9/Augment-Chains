@@ -11,80 +11,54 @@ phases:
       - echo Starting Install Phase
       - pip install -U pip
       - pip install yq jq tomlkit==0.7.2
-      
-      # Retrieve CI/Build artifact which contains helm chart location and version to deploy
       - cat $CODEBUILD_SRC_DIR_containerBuildArtifact/imagedefinitions.json
       - HELM_CHART_NAME=$(jq -r .helm_chart_name $CODEBUILD_SRC_DIR_containerBuildArtifact/imagedefinitions.json)
       - HELM_CHART_REPO=$(jq -r .helm_chart_repo $CODEBUILD_SRC_DIR_containerBuildArtifact/imagedefinitions.json)
       - HELM_CHART_VERSION=$(jq -r .helmChartVersion $CODEBUILD_SRC_DIR_containerBuildArtifact/imagedefinitions.json)
-      
-      # Install Helm CLI
       - echo Installing Helm
       - curl https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3 > get_helm.sh
       - chmod 700 get_helm.sh
       - ./get_helm.sh
-      
-      # Log into ECR repository hosting helm charts
       - aws ecr get-login-password --region $PIPELINE_REGION | helm registry login --username AWS --password-stdin 410997643304.dkr.ecr.us-east-1.amazonaws.com
-      
+
   pre_build:
     commands:
       - echo Starting Pre-Build Phase
-      
+
   build:
     commands:
-      # Retrieve cluster name from helm chart environment yaml
       - CLUSTER_NAME=$(yq -r .cluster_name helm-chart/dev.yaml)
-      - echo "Target Cluster: $CLUSTER_NAME"
-      
-      # Assume role into StandardPipelineRole
-      - echo "Assuming StandardPipelineRole..."
+      - echo "Target Cluster $CLUSTER_NAME"
       - temp_role=$(aws sts assume-role --role-arn arn:aws:iam::729149427743:role/StandardPipelineRole --role-session-name eks-session)
       - export AWS_ACCESS_KEY_ID=$(echo $temp_role | jq -r .Credentials.AccessKeyId)
       - export AWS_SECRET_ACCESS_KEY=$(echo $temp_role | jq -r .Credentials.SecretAccessKey)
       - export AWS_SESSION_TOKEN=$(echo $temp_role | jq -r .Credentials.SessionToken)
       - export AWS_REGION=$CLUSTER_REGION
-      
-      # Authenticate to EKS Cluster
-      - echo "Authenticating to EKS cluster..."
       - aws eks update-kubeconfig --name $CLUSTER_NAME --region $CLUSTER_REGION
-      
-      # Debug cluster state
-      - echo "Checking cluster state..."
       - kubectl get nodes
       - kubectl cluster-info
-      
-      # Pull down helm charts
       - NAMESPACE=$(yq -r .namespace helm-chart/dev.yaml)
-      - echo "Pulling Helm chart from $HELM_CHART_REPO..."
       - helm pull oci://$HELM_CHART_REPO --version $HELM_CHART_VERSION
       - ls -lrt
-      
-      # Check existing deployments
-      - echo "Checking existing deployments..."
       - helm list -n $NAMESPACE || true
       - kubectl get pods -n $NAMESPACE || true
-      
-      # Deploy helm chart to dev cluster
       - |
         echo "Starting Helm deployment..."
         helm upgrade --install $HELM_CHART_NAME ./$HELM_CHART_NAME-$HELM_CHART_VERSION.tgz \
-        -f helm-chart/dev.yaml \
-        --create-namespace \
-        --namespace $NAMESPACE \
-        --timeout 30m \
-        --wait \
-        --debug \
-        --set resources.limits.cpu="1000m" \
-        --set resources.limits.memory="4Gi" \
-        --set resources.requests.cpu="250m" \
-        --set resources.requests.memory="2Gi"
-      
-      # Wait for deployment
+          -f helm-chart/dev.yaml \
+          --create-namespace \
+          --namespace $NAMESPACE \
+          --timeout 30m \
+          --wait \
+          --debug \
+          --set resources.limits.cpu="1000m" \
+          --set resources.limits.memory="4Gi" \
+          --set resources.requests.cpu="250m" \
+          --set resources.requests.memory="2Gi"
       - |
         echo "Waiting for deployment to complete..."
-        TIMEOUT=1200  # 20 minutes in seconds
-        INTERVAL=10   # check every 10 seconds
+        TIMEOUT=1200
+        INTERVAL=10
         ELAPSED=0
         
         while [ $ELAPSED -lt $TIMEOUT ]; do
@@ -99,35 +73,17 @@ phases:
             break
           fi
           
-          if [ $ELAPSED -eq 0 ]; then
-            echo "Initial deployment state:"
-            kubectl describe deployment -n $NAMESPACE $HELM_CHART_NAME || true
-            kubectl get events -n $NAMESPACE --sort-by=.metadata.creationTimestamp || true
-          fi
-          
           sleep $INTERVAL
           ELAPSED=$((ELAPSED + INTERVAL))
           
           if [ $((ELAPSED % 60)) -eq 0 ]; then
             echo "Still waiting... ($ELAPSED seconds elapsed)"
             kubectl get pods -n $NAMESPACE -l app.kubernetes.io/instance=$HELM_CHART_NAME || true
-            kubectl get events -n $NAMESPACE --sort-by=.metadata.creationTimestamp | tail -5 || true
           fi
         done
-        
-        if [ $ELAPSED -ge $TIMEOUT ]; then
-          echo "Deployment timed out after $TIMEOUT seconds"
-          echo "Final deployment state:"
-          kubectl describe deployment -n $NAMESPACE $HELM_CHART_NAME || true
-          kubectl get events -n $NAMESPACE --sort-by=.metadata.creationTimestamp || true
-          exit 1
-        fi
 
   post_build:
     commands:
       - |
         echo "Deployment completed on $(date)"
-        echo "Final deployment status:"
         kubectl get all -n $NAMESPACE -l app.kubernetes.io/instance=$HELM_CHART_NAME
-        echo "Recent events:"
-        kubectl get events -n $NAMESPACE --sort-by=.metadata.creationTimestamp | tail -10
