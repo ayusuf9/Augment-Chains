@@ -1,0 +1,107 @@
+# Cluster Configuration
+cluster_name: quanthub-blueprint-control-plane
+namespace: aa00002695-quanthub-dev-01
+
+# Application Configuration
+appName: qrt-qh-cfii-muni-app
+app_pods: 1
+
+# Resource Limits (optimized for Streamlit)
+limit_cpu: 1000m
+limit_memory: 4Gi
+requests_cpu: 250m
+requests_memory: 2Gi
+
+# SSL/TLS Configuration
+ssl_certificate: arn:aws:acm:us-east-1:729149427743:certificate/5f1e6eaa-b633-4fab-a46a-b0b48173b1ef
+
+# Ingress Configuration
+ingress_hostname: muni-app.qrt-pr1.qh.aws-dev.cg.com
+ingress:
+  enabled: true
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+    alb.ingress.kubernetes.io/actions.ssl-redirect: '{"Type": "redirect", "RedirectConfig": { "Protocol": "HTTPS", "Port": "443", "StatusCode": "HTTP_301"}}'
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:729149427743:certificate/5f1e6eaa-b633-4fab-a46a-b0b48173b1ef
+    alb.ingress.kubernetes.io/healthcheck-path: "/_stcore/health"
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "15"
+    alb.ingress.kubernetes.io/healthcheck-timeout-seconds: "5"
+    alb.ingress.kubernetes.io/success-codes: "200-399"
+    alb.ingress.kubernetes.io/healthy-threshold-count: "2"
+    alb.ingress.kubernetes.io/unhealthy-threshold-count: "2"
+
+# Environment Variables
+ENV: DEV
+ENV_FOR_DYNACONF: development
+
+# Streamlit Specific Configuration
+streamlit:
+  config:
+    server:
+      port: 8501
+      address: 0.0.0.0
+      baseUrlPath: "/"
+      enableCORS: true
+      enableXsrfProtection: true
+      maxUploadSize: 200
+    browser:
+      serverAddress: "muni-app.qrt-pr1.qh.aws-dev.cg.com"
+      gatherUsageStats: false
+    theme:
+      primaryColor: "#1f77b4"
+      backgroundColor: "#ffffff"
+      secondaryBackgroundColor: "#f0f2f6"
+      textColor: "#31333F"
+
+# Liveness and Readiness Probes
+probes:
+  liveness:
+    enabled: true
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+    successThreshold: 1
+    path: "/_stcore/health"
+  readiness:
+    enabled: true
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+    successThreshold: 1
+    path: "/_stcore/health"
+
+# Pod Security Context
+securityContext:
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+
+# Pod Disruption Budget
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# Service Configuration
+service:
+  type: ClusterIP
+  port: 8501
+  targetPort: 8501
+
+# Pod Anti-Affinity (to spread pods across nodes)
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+    - weight: 100
+      podAffinityTerm:
+        labelSelector:
+          matchExpressions:
+          - key: app.kubernetes.io/name
+            operator: In
+            values:
+            - qrt-qh-cfii-muni-app
+        topologyKey: kubernetes.io/hostname
