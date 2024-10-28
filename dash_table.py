@@ -74,16 +74,12 @@ app.layout = html.Div([
                 'margin': '20px 0'
             },
             
-            # Striped rows
+            # Combined conditional styling for striped rows and hover
             style_data_conditional=[
                 {
                     'if': {'row_index': 'odd'},
                     'backgroundColor': '#f8fafc'  # Light gray for odd rows
-                }
-            ],
-            
-            # Hover effect
-            style_data_conditional=[
+                },
                 {
                     'if': {'state': 'hover'},
                     'backgroundColor': '#e2e8f0',
