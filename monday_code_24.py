@@ -5,205 +5,224 @@ import pandas as pd
 from datetime import datetime
 from streamlit_navigation_bar import st_navbar
 from streamlit_extras.switch_page_button import switch_page
+from langchain.embeddings.openai import OpenAIEmbeddings
+from langchain.vectorstores.faiss import FAISS
+from langchain.chat_models import AzureChatOpenAI
+from langchain.chains import RetrievalQA
+from langchain.prompts import PromptTemplate
+from langchain import LLMChain
+from langchain.retrievers.multi_query import MultiQueryRetriever
+from quanthub.util import llm
 
 # Configuration
 CACHE_FILE = "qa_preprocessed_cache.json"
-CUSTOM_CACHE_FILE = "custom_qa_cache.json"
 
-# Page configuration
-st.set_page_config(
-    layout="wide",
-    page_icon="📑",
-    page_title="Property Analysis Dashboard",
-    initial_sidebar_state="collapsed"
-)
+# Page setup
+st.set_page_config(layout="wide", page_icon="📑", page_title="Property Analysis")
 
-# Keep existing styles...
+def initialize_session_state():
+    if 'results_df' not in st.session_state:
+        st.session_state.results_df = load_cached_results()
+    if 'processing' not in st.session_state:
+        st.session_state.processing = False
+    if 'llm' not in st.session_state:
+        st.session_state.llm = load_llm_model()
+    if 'embeddings' not in st.session_state:
+        st.session_state.embeddings = load_embeddings_model()
 
 def load_cached_results():
-    """Load pre-processed results from cache file"""
+    """Load pre-processed results from cache"""
     try:
         if os.path.exists(CACHE_FILE):
             with open(CACHE_FILE, 'r') as f:
                 cache_data = json.load(f)
-                results_dict = cache_data.get('results', {})
-                return pd.DataFrame.from_dict(results_dict)
-        else:
-            st.error(f"Cache file {CACHE_FILE} not found!")
-            return pd.DataFrame()
+                return pd.DataFrame.from_dict(cache_data.get('results', {}))
+        return pd.DataFrame()
     except Exception as e:
         st.error(f"Error loading cache: {str(e)}")
         return pd.DataFrame()
 
-def load_custom_cache():
-    """Load custom questions cache"""
+def load_embeddings_model():
+    """Initialize embeddings model"""
+    openai_api_client = llm.get_azure_openai_client()
     try:
-        if os.path.exists(CUSTOM_CACHE_FILE):
-            with open(CUSTOM_CACHE_FILE, 'r') as f:
-                return json.load(f)
-        return {'questions': [], 'results': {}}
-    except Exception:
-        return {'questions': [], 'results': {}}
-
-def save_custom_cache(cache_data):
-    """Save custom questions cache"""
-    try:
-        with open(CUSTOM_CACHE_FILE, 'w') as f:
-            json.dump(cache_data, f)
+        return OpenAIEmbeddings(
+            deployment="text-embedding-ada-002",
+            model="text-embedding-ada-002",
+            openai_api_key=openai_api_client.api_key,
+            openai_api_base=openai_api_client.api_base,
+            openai_api_type=openai_api_client.api_type,
+            chunk_size=1
+        )
     except Exception as e:
-        st.error(f"Error saving custom cache: {str(e)}")
+        st.error(f"Failed to load embeddings: {str(e)}")
+        return None
+
+def load_llm_model():
+    """Initialize LLM model"""
+    openai_api_client = llm.get_azure_openai_client()
+    try:
+        return AzureChatOpenAI(
+            deployment_name='gpt-4o',
+            model_name='gpt-4o',
+            openai_api_version="2024-02-01",
+            openai_api_key=openai_api_client.api_key,
+            openai_api_base=openai_api_client.api_base,
+            openai_api_type="azure_ad",
+            temperature=0.0,
+            streaming=True
+        )
+    except Exception as e:
+        st.error(f"Failed to load LLM: {str(e)}")
+        return None
+
+def get_multi_query_retriever(vector_store):
+    """Setup retriever"""
+    question_prompt = PromptTemplate(
+        input_variables=["question"],
+        template="""You are an expert in municipal finance. Break down the question:
+        Question: {question}
+        Generate similar alternative questions."""
+    )
+    
+    try:
+        return MultiQueryRetriever.from_llm(
+            llm=st.session_state.llm,
+            retriever=vector_store.as_retriever(search_kwargs={"k": 10}),
+            parser_key="questions",
+            prompt=question_prompt
+        )
+    except Exception as e:
+        st.error(f"Retriever error: {str(e)}")
+        return None
+
+def process_new_question(question, vector_stores):
+    """Process a single new question"""
+    results = {}
+    
+    chat_prompt = PromptTemplate(
+        template="""
+        Question: {question}
+        Context: {context}
+        Answer: Provide a detailed analysis.""",
+        input_variables=["question", "context"]
+    )
+    
+    for identifier, vector_store in vector_stores.items():
+        try:
+            retriever = get_multi_query_retriever(vector_store)
+            if not retriever:
+                continue
+                
+            qa_chain = RetrievalQA.from_chain_type(
+                llm=st.session_state.llm,
+                chain_type="stuff",
+                retriever=retriever,
+                chain_type_kwargs={"prompt": chat_prompt}
+            )
+            
+            result = qa_chain.run(question)
+            results[identifier] = result.strip()
+            
+        except Exception as e:
+            results[identifier] = f"Error: {str(e)}"
+    
+    return results
+
+def load_vector_stores(selected_ids):
+    """Load vector stores for selected documents"""
+    vector_stores = {}
+    base_path = '/app/pdfs_qa'
+    
+    for identifier in selected_ids:
+        try:
+            index_folder = os.path.join(base_path, f"{identifier}_faiss_index")
+            if os.path.exists(index_folder):
+                vector_store = FAISS.load_local(
+                    index_folder,
+                    embeddings=st.session_state.embeddings,
+                    allow_dangerous_deserialization=True
+                )
+                vector_stores[identifier] = vector_store
+        except Exception as e:
+            st.error(f"Error loading index for {identifier}: {str(e)}")
+    
+    return vector_stores
 
 def style_dataframe(df):
-    # Keep existing style_dataframe function...
-    pass
-
-def initialize_session_state():
-    """Initialize session state variables"""
-    if 'selected_docs' not in st.session_state:
-        st.session_state.selected_docs = []
-    if 'results_df' not in st.session_state:
-        st.session_state.results_df = None
-    if 'custom_questions' not in st.session_state:
-        st.session_state.custom_questions = []
-    if 'custom_results' not in st.session_state:
-        st.session_state.custom_results = {}
+    """Style the results table"""
+    return df.style.set_properties(**{
+        'text-align': 'left',
+        'font-size': '16px',
+        'padding': '8px',
+        'border': '1px solid lightgrey'
+    }).set_table_styles([
+        {'selector': 'th', 'props': [
+            ('background-color', '#f0f2f6'),
+            ('font-weight', 'bold'),
+            ('font-size', '18px')
+        ]},
+        {'selector': 'tr:nth-of-type(even)', 'props': [
+            ('background-color', '#f9f9f9')
+        ]}
+    ])
 
 def main():
     initialize_session_state()
     
-    # Navigation bar
-    page = st_navbar(["Home", "Chat", "Tables"], selected="Tables", styles=styles)
+    # Navigation
+    page = st_navbar(["Home", "Chat", "Tables"], selected="Tables")
+    if page == "Home": switch_page("streamlit app")
+    if page == "Chat": switch_page("chat")
     
-    if page == "Home":
-        switch_page("streamlit app")
-    if page == "Chat":
-        switch_page("chat")
-
     st.title("Property Analysis Dashboard")
     
-    # Load both pre-processed and custom results
-    if st.session_state.results_df is None:
-        st.session_state.results_df = load_cached_results()
+    # Get available documents
+    available_docs = st.session_state.results_df.columns.tolist()
+    selected_docs = st.multiselect("Select documents:", available_docs)
     
-    results_df = st.session_state.results_df
-    
-    if results_df.empty:
-        st.error("No pre-processed data available. Please contact administrator.")
-        return
-    
-    # Load custom cache
-    custom_cache = load_custom_cache()
-    st.session_state.custom_questions = custom_cache['questions']
-    st.session_state.custom_results = custom_cache['results']
-    
-    # Get available documents from cached results
-    available_identifiers = results_df.columns.tolist()
-    
-    # Document selection with session state persistence
-    selected_identifiers = st.multiselect(
-        "Select documents to analyze:",
-        available_identifiers,
-        default=st.session_state.selected_docs
-    )
-    st.session_state.selected_docs = selected_identifiers
-
-    # Custom question input
-    st.markdown("### Add Custom Question")
-    col1, col2 = st.columns([3, 1])
-    
-    with col1:
-        new_question = st.text_input("Enter your question:", key="new_question")
-    
-    with col2:
-        if st.button("Add Question"):
-            if new_question.strip():
-                if new_question not in st.session_state.custom_questions:
-                    st.session_state.custom_questions.append(new_question)
-                    # Save to custom cache
-                    custom_cache['questions'] = st.session_state.custom_questions
-                    save_custom_cache(custom_cache)
-                    st.success("Question added successfully!")
+    if selected_docs:
+        # Display existing results
+        display_df = st.session_state.results_df[selected_docs]
+        
+        # Question input
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            new_question = st.text_input("Add a new question:")
+        with col2:
+            if st.button("Process Question"):
+                if new_question.strip():
+                    with st.spinner("Processing new question..."):
+                        # Load vector stores
+                        vector_stores = load_vector_stores(selected_docs)
+                        
+                        # Process question
+                        results = process_new_question(new_question, vector_stores)
+                        
+                        # Add to results DataFrame
+                        st.session_state.results_df.loc[new_question] = pd.Series(results)
+                        
+                        # Update display
+                        display_df = st.session_state.results_df[selected_docs]
                 else:
-                    st.warning("This question has already been added.")
-            else:
-                st.warning("Please enter a question before adding.")
-
-    # Display results
-    if selected_identifiers:
-        # Combine pre-processed and custom questions
-        all_questions = list(results_df.index) + st.session_state.custom_questions
+                    st.warning("Please enter a question")
         
-        # Create combined results DataFrame
-        combined_results = results_df.copy()
+        # Display results table
+        st.markdown("### Analysis Results")
+        styled_df = style_dataframe(display_df)
+        st.write(styled_df.to_html(escape=False), unsafe_allow_html=True)
         
-        # Add custom questions to the DataFrame
-        for question in st.session_state.custom_questions:
-            if question not in combined_results.index:
-                new_row = pd.Series("Not processed yet", index=combined_results.columns)
-                combined_results.loc[question] = new_row
-        
-        # Display selected columns
-        display_df = combined_results[selected_identifiers]
-        
-        # Create tabs for different views
-        tab1, tab2 = st.tabs(["All Questions", "Custom Questions Only"])
-        
-        with tab1:
-            st.markdown("### All Questions")
-            styled_df = style_dataframe(display_df)
-            st.write(styled_df.to_html(escape=False), unsafe_allow_html=True)
-        
-        with tab2:
-            if st.session_state.custom_questions:
-                st.markdown("### Custom Questions")
-                custom_df = display_df.loc[st.session_state.custom_questions]
-                styled_custom_df = style_dataframe(custom_df)
-                st.write(styled_custom_df.to_html(escape=False), unsafe_allow_html=True)
-            else:
-                st.info("No custom questions added yet.")
-        
-        # Export functionality
-        st.sidebar.markdown("### Export Options")
-        export_option = st.sidebar.radio(
-            "Choose what to export:",
-            ["All Questions", "Custom Questions Only", "Default Questions Only"]
-        )
-        
-        if st.sidebar.button("Export Results"):
-            if export_option == "All Questions":
-                export_df = display_df
-            elif export_option == "Custom Questions Only":
-                export_df = display_df.loc[st.session_state.custom_questions]
-            else:
-                export_df = display_df.loc[list(results_df.index)]
-            
-            csv = export_df.to_csv().encode('utf-8')
-            st.sidebar.download_button(
+        # Export option
+        if st.button("Export Results"):
+            csv = display_df.to_csv().encode('utf-8')
+            st.download_button(
                 label="Download CSV",
                 data=csv,
-                file_name=f"property_analysis_{datetime.now().strftime('%Y%m%d')}_{export_option}.csv",
+                file_name=f"analysis_results_{datetime.now().strftime('%Y%m%d')}.csv",
                 mime="text/csv"
             )
-        
-        # Display metadata
-        st.sidebar.markdown("### Analysis Details")
-        st.sidebar.markdown(f"**Selected Properties:** {len(selected_identifiers)}")
-        st.sidebar.markdown(f"**Total Questions:** {len(display_df.index)}")
-        st.sidebar.markdown(f"**Custom Questions:** {len(st.session_state.custom_questions)}")
-        
     else:
-        st.info("Please select one or more documents to view the analysis.")
-
-    # Add footer
-    st.markdown("---")
-    st.markdown(
-        """
-        <div style='text-align: center; color: #666;'>
-        For support, please contact your administrator
-        </div>
-        """, 
-        unsafe_allow_html=True
-    )
+        st.info("Please select documents to view analysis")
 
 if __name__ == "__main__":
     main()
