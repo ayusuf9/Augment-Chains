@@ -1,88 +1,74 @@
-# Install required libraries if not already installed
-# !pip install tabula-py pandas
-
-from tabula import read_pdf
+import fitz  # PyMuPDF
 import pandas as pd
 
-# File path to the uploaded PDF
-file_path = "/mnt/data/WRLDB.pdf"
+def extract_tables_from_pdf(pdf_path):
+    """
+    Extracts tables from a PDF, grouped by asset type.
 
-# Extract tables from the PDF
-tables = read_pdf(file_path, pages="all", multiple_tables=True, stream=True)
+    Args:
+        pdf_path: Path to the PDF file.
 
-# Define asset categories based on the structure of the PDF
-asset_categories = [
-    "ASSET & COMMERCIAL MORTGAGE-BACKED SECURITIES",
-    "FOREIGN GOVERNMENT OBLIGATIONS",
-    "FOREIGN CURRENCY",
-    "CALL OPTIONS PURCHASED",
-    "CONVERTIBLE BONDS",
-    "CORPORATE BONDS",
-    "PUT OPTIONS PURCHASED",
-    "SENIOR FLOATING RATE INTERESTS",
-]
+    Returns:
+        A dictionary where keys are asset types and values are pandas DataFrames.
+    """
 
-# Dictionary to store data grouped by asset categories
-grouped_assets = {category: [] for category in asset_categories}
+    doc = fitz.open(pdf_path)
+    tables_by_asset = {}
+    current_asset = None
+    current_table_data = []
 
-# Helper function to identify asset categories in a table
-def categorize_table(table, asset_categories):
-    for category in asset_categories:
-        if any(category in str(cell) for cell in table.iloc[:, 0]):
-            return category
-    return None
+    for page_num in range(doc.page_count):
+        page = doc[page_num]
+        blocks = page.get_text("dict", flags=fitz.TEXT_DEHYPHENATE)["blocks"]
 
-# Process each table and categorize
-for table in tables:
-    # Ensure the table is a valid DataFrame
-    if not isinstance(table, pd.DataFrame) or table.empty:
-        continue
-    
-    # Try to categorize the table
-    category = categorize_table(table, asset_categories)
-    
-    if category:
-        grouped_assets[category].append(table)
-
-# Output grouped data to CSV files or display
-for category, tables in grouped_assets.items():
-    if tables:
-        combined_table = pd.concat(tables, ignore_index=True)
-        file_name = f"{category.replace('&', 'and').replace(' ', '_')}.csv"
-        combined_table.to_csv(file_name, index=False)
-        print(f"Saved {category} data to {file_name}.")
-    else:
-        print(f"No data found for {category}.")
+        for block in blocks:
+            if "lines" in block:  # Check if it's a text block
+                for line in block["lines"]:
+                    for span in line["spans"]:
+                        text = span["text"].strip()
+                        if span["color"] == 2631895 and text != "HARTFORD FUNDS": # Blue separator with check
+                            if current_table_data: # Append data before new asset
+                                if current_asset not in tables_by_asset:
+                                    tables_by_asset[current_asset] = []
+                                df = pd.DataFrame(current_table_data)
+                                # Forward fill the asset name and cleanup
+                                df[0] = df[0].replace("", method='ffill')
+                                df = df[df[0] == current_asset]
+                                df = df.drop(0, axis=1).dropna(how='all') # Remove asset name col, drop empty rows
+                                tables_by_asset[current_asset].append(df) # Append the df, not the list
+                                current_table_data = []  # Start a new table
+                            current_asset = text  #  Use separator as the next asset name
+                        elif current_asset: # Only if under an asset section header
+                            if text != "Page" and not text.startswith("09.30.24"):  # Exclude page numbers and dates
+                                current_table_data.append(text.split())
 
 
+    # Handle the last table (if any)
+    if current_table_data:
+        if current_asset not in tables_by_asset:
+            tables_by_asset[current_asset] = []
+        df = pd.DataFrame(current_table_data)
+        # Forward fill the asset name and cleanup
+        df[0] = df[0].replace("", method='ffill')
+        df = df[df[0] == current_asset]
+        df = df.drop(0, axis=1).dropna(how='all') # Remove asset name col, drop empty rows
+        tables_by_asset[current_asset].append(df) # Append the df, not the list
+        
+
+    # Concatenate the tables within each asset for multi-page tables
+    for asset, tables in tables_by_asset.items():
+        tables_by_asset[asset] = pd.concat(tables, ignore_index=True) # Concat list of dfs
+
+    return tables_by_asset
 
 
+if __name__ == "__main__":
+    pdf_file = "WRLDB.pdf"
+    extracted_tables = extract_tables_from_pdf(pdf_file)
 
-Copyasset_categories = [
-    "ASSET & COMMERCIAL MORTGAGE-BACKED SECURITIES",
-    "BASE CURRENCY",
-    "CALL OPTIONS PURCHASED",
-    "COMMON STOCKS",
-    "CONVERTIBLE BONDS", 
-    "CORPORATE BONDS",
-    "FOREIGN CURRENCY",
-    "FOREIGN GOVERNMENT OBLIGATIONS",
-    "PUT OPTIONS PURCHASED",
-    "PUTS EXCHANGE-TRADED OPTIONS",
-    "SENIOR FLOATING RATE INTERESTS",
-    "SHORT-TERM INVESTMENTS",
-    "U.S. GOVERNMENT AGENCIES",
-    "U.S. GOVERNMENT SECURITIES",
-    "WRITTEN OPTIONS PUTS",
-    "DERIVATIVES - CENTRALLY CLEARED CREDIT DEFAULT SWAP CONTRACTS",
-    "DERIVATIVES - CENTRALLY CLEARED INTEREST RATE SWAP CONTRACTS",
-    "DERIVATIVES - FOREIGN CURRENCY CONTRACTS",
-    "DERIVATIVES - FOREIGN CURRENCY EXCHANGE CONTRACTS (SPOT)",
-    "DERIVATIVES - FUTURES CONTRACTS",
-    "DERIVATIVES - OTC CREDIT DEFAULT SWAP CONTRACTS",
-    "DERIVATIVES - OTC INTEREST RATE SWAP CONTRACTS",
-    "DERIVATIVES - SWAPTIONS CALL",
-    "DERIVATIVES - SWAPTIONS PUT",
-    "DERIVATIVES - TBA SALE COMMITMENTS",
-    "DERIVATIVES - WRITTEN SWAPTIONS PUT"
-]
+    for asset_type, table in extracted_tables.items():
+        print(f"\nTable for {asset_type}:")
+        display(table) # Display in Jupyter uses better formatting than print
+
+        # Or save to CSV:
+        #table.to_csv(f"{asset_type}.csv", index=False) 
