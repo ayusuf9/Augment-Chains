@@ -1,77 +1,56 @@
-import tabula
+# Install required libraries if not already installed
+# !pip install tabula-py pandas
+
+from tabula import read_pdf
 import pandas as pd
-import re
 
-def clean_dataframe(df):
-    # Drop rows where all elements are NaN
-    df = df.dropna(how='all')
-    
-    # Reset index
-    df = df.reset_index(drop=True)
-    
-    # Remove rows that contain only the page header
-    df = df[~df.iloc[:,0].str.contains('Page', na=False)]
-    df = df[~df.iloc[:,0].str.contains('HARTFORD FUNDS', na=False)]
-    
-    return df
+# File path to the uploaded PDF
+file_path = "/mnt/data/WRLDB.pdf"
 
-def extract_and_organize_tables(pdf_path):
-    # Read all tables from the PDF
-    tables = tabula.read_pdf(pdf_path, pages='all', multiple_tables=True)
-    
-    # Initialize a dictionary to store asset-type grouped tables
-    asset_groups = {}
-    current_asset_type = None
-    current_df = None
-    
-    # Define column names
-    columns = ['Security', 'Coupon', 'Maturity', 'Shares/Par Value', '% of Net Assets']
-    
-    for table in tables:
-        if table.empty:
-            continue
-            
-        # Clean the table
-        table = clean_dataframe(table)
-        
-        for idx, row in table.iterrows():
-            # Convert row to string and check for asset type headers
-            row_text = ' '.join([str(x) for x in row.values])
-            
-            # Check if this row is an asset type header
-            if row_text.isupper() and not any(char.isdigit() for char in row_text):
-                if current_asset_type and current_df is not None:
-                    asset_groups[current_asset_type] = current_df
-                
-                current_asset_type = row_text.strip()
-                current_df = pd.DataFrame(columns=columns)
-                continue
-            
-            # If we have a current asset type, add data to the current dataframe
-            if current_asset_type and not row.empty:
-                try:
-                    # Ensure row has correct number of columns
-                    if len(row) >= 5:
-                        new_row = pd.DataFrame([row.values[:5]], columns=columns)
-                        current_df = pd.concat([current_df, new_row], ignore_index=True)
-                except Exception as e:
-                    print(f"Error processing row: {row}")
-                    print(f"Error: {e}")
-    
-    # Add the last group
-    if current_asset_type and current_df is not None:
-        asset_groups[current_asset_type] = current_df
-    
-    return asset_groups
+# Extract tables from the PDF
+tables = read_pdf(file_path, pages="all", multiple_tables=True, stream=True)
 
-# Execute the extraction
-pdf_path = "WRLDB.pdf"  # Replace with your PDF path
-asset_tables = extract_and_organize_tables(pdf_path)
+# Define asset categories based on the structure of the PDF
+asset_categories = [
+    "ASSET & COMMERCIAL MORTGAGE-BACKED SECURITIES",
+    "FOREIGN GOVERNMENT OBLIGATIONS",
+    "FOREIGN CURRENCY",
+    "CALL OPTIONS PURCHASED",
+    "CONVERTIBLE BONDS",
+    "CORPORATE BONDS",
+    "PUT OPTIONS PURCHASED",
+    "SENIOR FLOATING RATE INTERESTS",
+]
 
-# Display results
-for asset_type, df in asset_tables.items():
-    print(f"\n{'='*80}")
-    print(f"Asset Type: {asset_type}")
-    print(f"{'='*80}")
-    print(df.head())
-    print(f"\nTotal entries: {len(df)}")
+# Dictionary to store data grouped by asset categories
+grouped_assets = {category: [] for category in asset_categories}
+
+# Helper function to identify asset categories in a table
+def categorize_table(table, asset_categories):
+    for category in asset_categories:
+        if any(category in str(cell) for cell in table.iloc[:, 0]):
+            return category
+    return None
+
+# Process each table and categorize
+for table in tables:
+    # Ensure the table is a valid DataFrame
+    if not isinstance(table, pd.DataFrame) or table.empty:
+        continue
+    
+    # Try to categorize the table
+    category = categorize_table(table, asset_categories)
+    
+    if category:
+        grouped_assets[category].append(table)
+
+# Output grouped data to CSV files or display
+for category, tables in grouped_assets.items():
+    if tables:
+        combined_table = pd.concat(tables, ignore_index=True)
+        file_name = f"{category.replace('&', 'and').replace(' ', '_')}.csv"
+        combined_table.to_csv(file_name, index=False)
+        print(f"Saved {category} data to {file_name}.")
+    else:
+        print(f"No data found for {category}.")
+
