@@ -1,77 +1,77 @@
+import tabula
 import pandas as pd
 import re
 
-# Function to clean up numeric values
-def clean_numeric(value):
-    if isinstance(value, str):
-        # Remove commas and convert percentages
-        value = value.replace(',', '')
-        if '%' in value:
-            value = float(value.replace('%', '')) / 100
-        # Handle parentheses for negative numbers
-        if '(' in value and ')' in value:
-            value = -float(value.replace('(', '').replace(')', ''))
-    return value
+def clean_dataframe(df):
+    # Drop rows where all elements are NaN
+    df = df.dropna(how='all')
+    
+    # Reset index
+    df = df.reset_index(drop=True)
+    
+    # Remove rows that contain only the page header
+    df = df[~df.iloc[:,0].str.contains('Page', na=False)]
+    df = df[~df.iloc[:,0].str.contains('HARTFORD FUNDS', na=False)]
+    
+    return df
 
-# Function to process the raw text and extract tables
-def extract_tables(text):
-    # Split the text into lines
-    lines = text.split('\n')
+def extract_and_organize_tables(pdf_path):
+    # Read all tables from the PDF
+    tables = tabula.read_pdf(pdf_path, pages='all', multiple_tables=True)
     
-    current_section = None
-    sections_data = {}
-    current_data = []
+    # Initialize a dictionary to store asset-type grouped tables
+    asset_groups = {}
+    current_asset_type = None
+    current_df = None
     
-    # Column names for our tables
+    # Define column names
     columns = ['Security', 'Coupon', 'Maturity', 'Shares/Par Value', '% of Net Assets']
     
-    for line in lines:
-        # Skip empty lines and page headers/footers
-        if not line.strip() or 'HARTFORD FUNDS' in line or 'Page' in line:
+    for table in tables:
+        if table.empty:
             continue
             
-        # Check if this is a new section header (in all caps)
-        if line.isupper() and 'SECURITIES' in line or 'BONDS' in line or 'CURRENCY' in line:
-            if current_section and current_data:
-                # Create DataFrame for previous section
-                df = pd.DataFrame(current_data, columns=columns)
-                sections_data[current_section] = df
-            
-            current_section = line.strip()
-            current_data = []
-            continue
+        # Clean the table
+        table = clean_dataframe(table)
         
-        # Process data lines
-        parts = line.split()
-        if len(parts) >= 5 and any(c.isdigit() for c in line):
-            try:
-                # Extract values
-                security = ' '.join(parts[:-4])
-                coupon = clean_numeric(parts[-4])
-                maturity = parts[-3]
-                shares_value = clean_numeric(parts[-2])
-                net_assets = clean_numeric(parts[-1])
+        for idx, row in table.iterrows():
+            # Convert row to string and check for asset type headers
+            row_text = ' '.join([str(x) for x in row.values])
+            
+            # Check if this row is an asset type header
+            if row_text.isupper() and not any(char.isdigit() for char in row_text):
+                if current_asset_type and current_df is not None:
+                    asset_groups[current_asset_type] = current_df
                 
-                current_data.append([security, coupon, maturity, shares_value, net_assets])
-            except:
+                current_asset_type = row_text.strip()
+                current_df = pd.DataFrame(columns=columns)
                 continue
+            
+            # If we have a current asset type, add data to the current dataframe
+            if current_asset_type and not row.empty:
+                try:
+                    # Ensure row has correct number of columns
+                    if len(row) >= 5:
+                        new_row = pd.DataFrame([row.values[:5]], columns=columns)
+                        current_df = pd.concat([current_df, new_row], ignore_index=True)
+                except Exception as e:
+                    print(f"Error processing row: {row}")
+                    print(f"Error: {e}")
     
-    # Add the last section
-    if current_section and current_data:
-        df = pd.DataFrame(current_data, columns=columns)
-        sections_data[current_section] = df
+    # Add the last group
+    if current_asset_type and current_df is not None:
+        asset_groups[current_asset_type] = current_df
     
-    return sections_data
+    return asset_groups
 
-# Read the text content
-with open('sample_content.txt', 'r') as file:
-    content = file.read()
+# Execute the extraction
+pdf_path = "WRLDB.pdf"  # Replace with your PDF path
+asset_tables = extract_and_organize_tables(pdf_path)
 
-# Extract tables
-tables = extract_tables(content)
-
-# Display tables by section
-for section, df in tables.items():
-    print(f"\n{'='*80}\n{section}\n{'='*80}")
+# Display results
+for asset_type, df in asset_tables.items():
+    print(f"\n{'='*80}")
+    print(f"Asset Type: {asset_type}")
+    print(f"{'='*80}")
     print(df.head())
-    print(f"\nTotal rows in section: {len(df)}")
+    print(f"\nTotal entries: {len(df)}")
