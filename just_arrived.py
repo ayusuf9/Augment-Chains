@@ -54,14 +54,45 @@ styles = {
     },
 }
 
-def load_cached_results():
-    """Load cached results from file"""
+def get_available_indexes(base_path):
+    """Get list of available FAISS indexes from the base path"""
     try:
+        indexes = []
+        for item in os.listdir(base_path):
+            if item.endswith('_faiss_index'):
+                identifier = item.replace('_faiss_index', '')
+                indexes.append(identifier)
+        return indexes
+    except Exception as e:
+        st.error(f"Error scanning indexes: {str(e)}")
+        return []
+
+def load_cached_results():
+    """Load cached results from file or initialize from available indexes"""
+    try:
+        # First try to load from cache
         if os.path.exists(CACHE_FILE):
             with open(CACHE_FILE, 'r') as f:
                 cache_data = json.load(f)
-                return pd.DataFrame.from_dict(cache_data.get('results', {}))
-        return pd.DataFrame()
+                df = pd.DataFrame.from_dict(cache_data.get('results', {}))
+                if not df.empty:
+                    return df
+        
+        # If no cache exists or it's empty, initialize from available indexes
+        available_indexes = get_available_indexes(BASE_PATH)
+        if available_indexes:
+            # Initialize an empty DataFrame with columns for each index
+            df = pd.DataFrame(columns=available_indexes)
+            
+            # Save this initial structure to cache
+            with open(CACHE_FILE, 'w') as f:
+                json.dump({'results': df.to_dict()}, f)
+            
+            return df
+        else:
+            st.warning("No FAISS indexes found in the base path")
+            return pd.DataFrame()
+            
     except Exception as e:
         st.error(f"Error loading cache: {str(e)}")
         return pd.DataFrame()
@@ -103,16 +134,23 @@ def load_llm_model():
 
 def initialize_session_state():
     """Initialize all session state variables"""
+    # Always ensure base path exists
+    if not os.path.exists(BASE_PATH):
+        st.error(f"Base path not found: {BASE_PATH}")
+        return
+
+    # Load results first
+    if 'results_df' not in st.session_state:
+        st.session_state.results_df = load_cached_results()
+    
     session_vars = {
         'custom_questions': [],
         'qa_results': pd.DataFrame(),
         'processed_documents': set(),
         'vector_stores': {},
-        'results_df': load_cached_results(),
         'processing': False
     }
     
-    # Initialize basic session variables
     for var, default in session_vars.items():
         if var not in st.session_state:
             st.session_state[var] = default
@@ -276,10 +314,6 @@ def main():
             st.error("Failed to initialize LLM or embeddings model")
             return
 
-        if not os.path.exists(BASE_PATH):
-            st.error(f"Base path not found: {BASE_PATH}")
-            return
-
         # Navigation setup
         options = {'show_menu': False}
         page = st_navbar(["Home", "Chat", "Tables"], selected="Tables", styles=styles, options=options)
@@ -291,31 +325,31 @@ def main():
 
         st.title("Comp Tables")
 
-        # Custom CSS for tags
-        st.markdown(
-            """
-            <style>
-            span[data-baseweb="tag"] {
-                background-color: rgb(54, 69, 79) !important;
-            }
-            </style>
-            """,
-            unsafe_allow_html=True,
-        )
+        # Debug information at the top
+        if st.checkbox("Show Debug Info"):
+            st.write("Base Path:", BASE_PATH)
+            st.write("Available Indexes:", get_available_indexes(BASE_PATH))
+            st.write("Results DataFrame Columns:", st.session_state.results_df.columns.tolist())
+            st.write("Session State Keys:", list(st.session_state.keys()))
 
-        # Document selection
-        available_docs = st.session_state.results_df.columns.tolist()
+        # Document selection with actual indexes
+        available_docs = get_available_indexes(BASE_PATH)
+        if not available_docs:
+            st.error("No FAISS indexes found in the base directory. Please check your data.")
+            return
+            
         selected_docs = st.multiselect(
             "Select documents:", 
             available_docs, 
-            default=available_docs[:5]
+            default=available_docs[:min(5, len(available_docs))]
         )
 
         if selected_docs:
-            # Display current results
-            display_df = st.session_state.results_df[selected_docs]
-            styled_df = style_dataframe(display_df)
-            st.write(styled_df.to_html(escape=False), unsafe_allow_html=True)
+            # Display current results if they exist
+            if not st.session_state.results_df.empty:
+                display_df = st.session_state.results_df[selected_docs]
+                styled_df = style_dataframe(display_df)
+                st.write(styled_df.to_html(escape=False), unsafe_allow_html=True)
 
             st.markdown("### Analysis Results")
 
@@ -386,11 +420,6 @@ def main():
                 st.warning("No vector stores could be loaded. Please check your data sources.")
         else:
             st.info("Please select documents to view analysis")
-
-        # Debug information
-        if st.checkbox("Show Debug Info"):
-            st.write("Current custom questions:", st.session_state.get('custom_questions', []))
-            st.write("Number of loaded vector stores:", len(vector_stores))
 
     except Exception as e:
         st.error(f"Application error: {str(e)}")
