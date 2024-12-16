@@ -413,3 +413,14 @@ def extract_and_format_table(pdf_path: str, table_description: str, llm_client) 
     except Exception as e:
         print(f"Error extracting table: {str(e)}")
         return None, None
+    
+
+df, page_num = extract_and_format_table(
+    pdf_path="/users/CFII_DataScience/USERs/SPTADM/LDO/MS 1.pdf",
+    table_description="Table Title is 'Valuation Methodology and Risks'",
+    llm_client=llm_client
+)
+
+if df is not None:
+    print(f"\nExtracted table from page {page_num}:")
+    print(df.to_string(index=False))
