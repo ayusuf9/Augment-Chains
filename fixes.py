@@ -293,3 +293,123 @@ def extract_table_from_pdf(pdf_path: str, table_description: str, llm_client) ->
     except Exception as e:
         print(f"Error extracting table: {str(e)}")
         return None, None
+    
+
+
+
+
+### SECOND TWO ##################################################################################
+### SECOND TWO ##################################################################################
+### SECOND TWO ##################################################################################
+### SECOND TWO ##################################################################################
+
+
+
+
+def extract_table(self, page_content: str) -> pd.DataFrame:
+    prompt = ChatPromptTemplate.from_template("""
+    Extract the trading table data and return it in CSV format.
+    Include these exact columns in order:
+    Trade,Entry Level,Entry Date,Rationale,Risks
+    
+    Important:
+    - Do NOT include any markdown formatting or code blocks
+    - Do NOT include ```csv or ``` markers
+    - Start directly with the header row
+    - End with the last data row
+    - Use commas as separators
+    - Use quotes only when necessary (for cells containing commas)
+    
+    Text to extract from:
+    {text}
+    """)
+    
+    csv_string = ""
+    try:
+        # Get response from LLM
+        messages = prompt.format_messages(text=page_content)
+        response = self.llm.invoke(messages)
+        
+        if not response or not response.content:
+            raise ValueError("Empty response from LLM")
+            
+        # Clean up the response - remove markdown code blocks
+        csv_string = response.content.strip()
+        csv_string = csv_string.replace('```csv', '').replace('```', '').strip()
+        
+        # Validate basic CSV structure
+        if ',' not in csv_string or '\n' not in csv_string:
+            raise ValueError("Response is not in valid CSV format")
+        
+        # Read the CSV data
+        df = pd.read_csv(
+            StringIO(csv_string),
+            dtype=str,
+            keep_default_na=False,
+            quotechar='"',
+            escapechar='\\'
+        )
+        
+        # Clean column names
+        df.columns = df.columns.str.strip()
+        
+        # Validate expected columns
+        expected_columns = ['Trade', 'Entry Level', 'Entry Date', 'Rationale', 'Risks']
+        missing_columns = [col for col in expected_columns if col not in df.columns]
+        
+        if missing_columns:
+            # If columns are missing, try one more time with different column handling
+            df = pd.read_csv(
+                StringIO(csv_string),
+                dtype=str,
+                keep_default_na=False,
+                quotechar='"',
+                escapechar='\\',
+                skipinitialspace=True,
+                names=expected_columns,
+                header=0
+            )
+        
+        # Ensure we have all expected columns
+        if not all(col in df.columns for col in expected_columns):
+            raise ValueError(f"Missing expected columns. Found: {df.columns.tolist()}")
+        
+        # Clean up the DataFrame
+        df = df[expected_columns]  # Reorder columns
+        df = df.apply(lambda x: x.str.strip() if isinstance(x, pd.Series) else x)
+        
+        return df
+        
+    except Exception as e:
+        error_details = f"""
+        Error Details:
+        - Original error: {str(e)}
+        - Raw response content:
+        {csv_string}
+        
+        - Columns found (if any): {df.columns.tolist() if 'df' in locals() else 'No DataFrame created'}
+        """
+        raise ValueError(f"Table extraction failed: {error_details}")
+
+# Modified usage example to better handle the output:
+def extract_and_format_table(pdf_path: str, table_description: str, llm_client) -> tuple[pd.DataFrame, int]:
+    try:
+        extractor = PDFTableExtractor(llm_client)
+        df, page_num = extractor.process_pdf(pdf_path, table_description)
+        
+        if df is not None:
+            # Set display options for better output
+            pd.set_option('display.max_colwidth', None)
+            pd.set_option('display.max_rows', None)
+            pd.set_option('display.width', None)
+            
+            # Verify the data matches expected format
+            for col in df.columns:
+                if df[col].astype(str).str.contains('```').any():
+                    df[col] = df[col].str.replace('```', '').str.strip()
+            
+            return df, page_num
+            
+    except Exception as e:
+        print(f"Error extracting table: {str(e)}")
+        return None, None
