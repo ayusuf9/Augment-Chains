@@ -136,3 +136,160 @@ def extract_table_from_pdf(pdf_path: str, table_description: str, llm_client) ->
     except Exception as e:
         print(f"Error extracting table: {str(e)}")
         return None, None
+    
+
+### SECOND TWO ##################################################################################
+### SECOND TWO ##################################################################################
+### SECOND TWO ##################################################################################
+### SECOND TWO ##################################################################################
+
+
+import os
+from typing import Optional, List, Tuple
+import pandas as pd
+from langchain_community.document_loaders import PyPDFLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.vectorstores import FAISS
+from langchain.embeddings.openai import OpenAIEmbeddings
+from langchain.prompts import ChatPromptTemplate
+from langchain.chat_models import AzureChatOpenAI
+from io import StringIO
+import warnings
+warnings.filterwarnings('ignore')
+
+class PDFTableExtractor:
+    def __init__(self, llm_client):
+        self.embeddings = OpenAIEmbeddings(
+            deployment='text-embedding-3-large',
+            model='text-embedding-3-large', 
+            openai_api_key=llm_client.api_key,
+            openai_api_base=llm_client.api_base,
+            openai_api_type=llm_client.api_type,
+            chunk_size=100
+        )
+        self.llm = AzureChatOpenAI(
+            deployment_name=llm_client.GPT_4_O1_MINI_MODEL,
+            model_name='o1-mini', 
+            openai_api_version="2024-09-01-preview",
+            openai_api_key=llm_client.api_key,
+            openai_api_base=llm_client.api_base,
+            openai_api_type="azure_ad",
+            temperature=0.0,
+        )
+    
+    def extract_table(self, page_content: str) -> pd.DataFrame:
+        # Improved prompt specifically for this table format
+        prompt = ChatPromptTemplate.from_template("""
+        Extract the trading strategy table from the text and format it as a CSV string.
+        Use these exact column headers in this order:
+        Trade,Entry Level,Entry Date,Rationale,Risks
+        
+        Requirements:
+        1. Ensure each cell's content is complete and not truncated
+        2. Preserve numerical values exactly as they appear
+        3. Use double quotes around any cell containing commas
+        4. Keep all text in a single line within its cell
+        5. Include ALL content from each cell
+        
+        Text content:
+        {text}
+        
+        Respond ONLY with the CSV formatted table:
+        """)
+        
+        messages = prompt.format_messages(text=page_content)
+        
+        try:
+            response = self.llm.invoke(messages)
+            csv_string = response.content.strip()
+            
+            # Custom parsing with specific column names
+            df = pd.read_csv(
+                StringIO(csv_string),
+                dtype=str,  # Prevent automatic type conversion
+                keep_default_na=False,  # Prevent NaN conversion
+                quotechar='"',  # Handle quoted cells properly
+                escapechar='\\'  # Handle escaped characters
+            )
+            
+            # Ensure expected columns exist
+            expected_columns = ['Trade', 'Entry Level', 'Entry Date', 'Rationale', 'Risks']
+            if not all(col in df.columns for col in expected_columns):
+                raise ValueError(f"Missing expected columns. Found: {df.columns.tolist()}")
+            
+            # Clean up the DataFrame
+            df = df.apply(lambda x: x.str.strip() if isinstance(x, pd.Series) else x)
+            
+            # Reorder columns if needed
+            df = df[expected_columns]
+            
+            return df
+            
+        except Exception as e:
+            raise ValueError(f"Table extraction failed: {str(e)}\nResponse content: {csv_string}")
+    
+    def find_table_page(self, pages: List[str], table_description: str) -> Optional[tuple]:
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=2000,  # Increased for better context
+            chunk_overlap=400
+        )
+        splits = text_splitter.split_documents(pages)
+        
+        vectorstore = FAISS.from_documents(splits, self.embeddings)
+        relevant_chunks = vectorstore.similarity_search(
+            f"Find a table containing trading strategies and risks: {table_description}",
+            k=4
+        )
+        
+        if not relevant_chunks:
+            return None
+        
+        for chunk in relevant_chunks:
+            for page_num, page in enumerate(pages):
+                if chunk.page_content in page.page_content:
+                    return (page.page_content, page_num + 1)
+        
+        return None
+    
+    def load_pdf(self, pdf_path: str) -> List[str]:
+        if not os.path.exists(pdf_path):
+            raise FileNotFoundError(f"PDF file not found: {pdf_path}")
+        loader = PyPDFLoader(pdf_path)
+        return loader.load()
+    
+    def process_pdf(self, pdf_path: str, table_description: str = None) -> tuple[pd.DataFrame, int]:
+        pages = self.load_pdf(pdf_path)
+        
+        if table_description:
+            result = self.find_table_page(pages, table_description)
+            if not result:
+                raise ValueError("Could not find the specified table in the PDF")
+            page_content, page_num = result
+        else:
+            if not pages:
+                raise ValueError("PDF contains no pages")
+            page_content = pages[0].page_content
+            page_num = 1
+        
+        df = self.extract_table(page_content)
+        
+        if df.empty:
+            raise ValueError(f"No table data was extracted from page {page_num}")
+            
+        return df, page_num
+
+# Usage example:
+def extract_table_from_pdf(pdf_path: str, table_description: str, llm_client) -> tuple[pd.DataFrame, int]:
+    try:
+        extractor = PDFTableExtractor(llm_client)
+        df, page_num = extractor.process_pdf(pdf_path, table_description)
+        
+        # Display settings for better output
+        pd.set_option('display.max_colwidth', None)
+        pd.set_option('display.max_rows', None)
+        pd.set_option('display.width', None)
+        
+        return df, page_num
+    except Exception as e:
+        print(f"Error extracting table: {str(e)}")
+        return None, None
